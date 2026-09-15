@@ -117,6 +117,62 @@ def auth_status():
         }), 401
 
 
+@app.route("/request_otp", methods=["POST"])
+def request_otp():
+    """
+    Kicks off Kia's OTP requirement. Kia will text or email you a code
+    depending on which method you pick.
+    """
+    if not authorize_request():
+        return jsonify({"error": "Unauthorized"}), 403
+
+    body = request.get_json(silent=True) or {}
+    method = body.get("method", "email")  # "email" or "phone"
+
+    try:
+        vehicle_manager.send_otp(method)
+        return jsonify({
+            "status": "otp_sent",
+            "method": method,
+            "message": f"Check your {method} for a Kia verification code, then hit /verify_otp with it."
+        }), 200
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/verify_otp", methods=["POST"])
+def verify_otp():
+    """
+    Submits the code Kia sent you to actually complete the login.
+    """
+    if not authorize_request():
+        return jsonify({"error": "Unauthorized"}), 403
+
+    body = request.get_json(silent=True) or {}
+    otp_code = body.get("otp_code")
+
+    if not otp_code:
+        return jsonify({"error": "Missing 'otp_code' in request body"}), 400
+
+    try:
+        vehicle_manager.verify_otp_and_complete_login(otp_code)
+        vehicle_manager.update_all_vehicles_with_cached_state()
+
+        vehicles = [
+            {"name": v.name, "id": v.id, "model": v.model, "year": v.year}
+            for v in vehicle_manager.vehicles.values()
+        ]
+
+        return jsonify({
+            "status": "verified",
+            "vehicles": vehicles
+        }), 200
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/list_vehicles", methods=["GET"])
 def list_vehicles():
     if not authorize_request():
