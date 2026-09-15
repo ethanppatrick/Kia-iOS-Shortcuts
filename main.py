@@ -1,6 +1,8 @@
 import os
+import json
+import requests
 from flask import Flask, request, jsonify
-from hyundai_kia_connect_api import VehicleManager, ClimateRequestOptions
+from hyundai_kia_connect_api import VehicleManager, ClimateRequestOptions, Token
 from hyundai_kia_connect_api.const import OTP_NOTIFY_TYPE
 from hyundai_kia_connect_api.exceptions import AuthenticationError
 
@@ -40,6 +42,57 @@ vehicle_manager = VehicleManager(
 )
 
 # =========================
+# Session persistence (Upstash Redis)
+# =========================
+# Vercel serverless functions don't keep the Python process alive between
+# requests, so the login token would normally vanish on every cold start.
+# We stash it in a free Upstash Redis database and reload it whenever a
+# fresh process comes up with no token in memory.
+UPSTASH_URL = os.environ.get("UPSTASH_REDIS_REST_URL")
+UPSTASH_TOKEN_SECRET = os.environ.get("UPSTASH_REDIS_REST_TOKEN")
+TOKEN_STORE_KEY = "kia_session_token"
+
+
+def _store_configured():
+    return bool(UPSTASH_URL and UPSTASH_TOKEN_SECRET)
+
+
+def save_token_to_store():
+    """Persist the current login token so it survives cold starts."""
+    if not _store_configured() or vehicle_manager.token is None:
+        return
+    try:
+        payload = json.dumps(vehicle_manager.token.to_dict())
+        requests.post(
+            f"{UPSTASH_URL}/set/{TOKEN_STORE_KEY}",
+            headers={"Authorization": f"Bearer {UPSTASH_TOKEN_SECRET}"},
+            data=payload,
+            timeout=10
+        )
+    except Exception:
+        pass  # best effort - don't break the request over a caching hiccup
+
+
+def restore_token_from_store():
+    """Load a previously saved token, if any. Returns True if one was restored."""
+    if not _store_configured():
+        return False
+    try:
+        resp = requests.get(
+            f"{UPSTASH_URL}/get/{TOKEN_STORE_KEY}",
+            headers={"Authorization": f"Bearer {UPSTASH_TOKEN_SECRET}"},
+            timeout=10
+        )
+        result = resp.json().get("result")
+        if not result:
+            return False
+        vehicle_manager.token = Token.from_dict(json.loads(result))
+        vehicle_manager.initialize_vehicles()
+        return True
+    except Exception:
+        return False
+
+# =========================
 # Helper Functions
 # =========================
 def authorize_request():
@@ -48,15 +101,22 @@ def authorize_request():
 
 def ensure_authenticated():
     """
-    Attempt to refresh Kia token.
-    Will fail if Kia requires OTP / captcha.
+    Makes sure we have a live Kia session, in this order:
+    1. Already logged in this process? nothing to do.
+    2. Fresh cold start with nothing in memory? try restoring a saved session.
+    3. Token exists but expired? refresh it, then re-save the new one.
+    4. None of that works? a real re-login via /request_otp is needed.
     """
+    if vehicle_manager.token is None:
+        restore_token_from_store()
+
     try:
         vehicle_manager.check_and_refresh_token()
+        save_token_to_store()
     except AuthenticationError as e:
         raise AuthenticationError(
             "Kia authentication failed. "
-            "Open the Kia app and complete 2FA, then retry."
+            "Hit /request_otp then /verify_otp again to start a new session."
         ) from e
 
 
@@ -139,6 +199,7 @@ def request_otp():
         if result is True:
             # No OTP needed this time, already logged in
             vehicle_manager.update_all_vehicles_with_cached_state()
+            save_token_to_store()
             return jsonify({
                 "status": "logged_in",
                 "message": "No OTP was required, login succeeded directly."
@@ -172,6 +233,7 @@ def verify_otp():
 
     try:
         vehicle_manager.verify_otp_and_complete_login(otp_code)
+        save_token_to_store()
 
         vehicles = [
             {"name": v.name, "id": v.id, "model": v.model, "year": v.year}
