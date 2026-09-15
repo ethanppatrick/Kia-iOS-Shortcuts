@@ -156,7 +156,7 @@ def verify_otp():
         return jsonify({"error": "Missing 'otp_code' in request body"}), 400
 
     try:
-        vehicle_manager.verify_otp(otp_code)
+        vehicle_manager.verify_otp_and_complete_login(otp_code)
         vehicle_manager.update_all_vehicles_with_cached_state()
 
         vehicles = [
