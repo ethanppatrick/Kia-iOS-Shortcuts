@@ -1,6 +1,7 @@
 import os
 from flask import Flask, request, jsonify
 from hyundai_kia_connect_api import VehicleManager, ClimateRequestOptions
+from hyundai_kia_connect_api.const import OTP_NOTIFY_TYPE
 from hyundai_kia_connect_api.exceptions import AuthenticationError
 
 app = Flask(__name__)
@@ -120,17 +121,31 @@ def auth_status():
 @app.route("/request_otp", methods=["POST"])
 def request_otp():
     """
-    Kicks off Kia's OTP requirement. Kia will text or email you a code
-    depending on which method you pick.
+    Kicks off Kia's OTP requirement. First attempts a normal login,
+    which either succeeds outright or comes back asking for OTP.
+    If OTP is required, this then tells Kia to send the code by
+    email or SMS.
     """
     if not authorize_request():
         return jsonify({"error": "Unauthorized"}), 403
 
     body = request.get_json(silent=True) or {}
-    method = body.get("method", "email")  # "email" or "phone"
+    method = body.get("method", "email").lower()  # "email" or "phone"
+    notify_type = OTP_NOTIFY_TYPE.SMS if method == "phone" else OTP_NOTIFY_TYPE.EMAIL
 
     try:
-        vehicle_manager.send_otp(method)
+        result = vehicle_manager.login()
+
+        if result is True:
+            # No OTP needed this time, already logged in
+            vehicle_manager.update_all_vehicles_with_cached_state()
+            return jsonify({
+                "status": "logged_in",
+                "message": "No OTP was required, login succeeded directly."
+            }), 200
+
+        # result is an OTPRequest, stored internally by the library
+        vehicle_manager.send_otp(notify_type)
         return jsonify({
             "status": "otp_sent",
             "method": method,
@@ -157,7 +172,6 @@ def verify_otp():
 
     try:
         vehicle_manager.verify_otp_and_complete_login(otp_code)
-        vehicle_manager.update_all_vehicles_with_cached_state()
 
         vehicles = [
             {"name": v.name, "id": v.id, "model": v.model, "year": v.year}
