@@ -144,6 +144,19 @@ def get_vehicle_id():
     return first_vehicle_id
 
 
+def wait_for_action_result(vehicle_id, action_id):
+    """
+    Kia's lock/unlock/climate commands return immediately with just an
+    action id, the actual success or failure (e.g. a door being open)
+    is only known once the vehicle reports back. This blocks until that
+    happens and returns the final ORDER_STATUS as a plain string.
+    """
+    status = vehicle_manager.check_action_status(
+        vehicle_id, action_id, synchronous=True, timeout=45
+    )
+    return status.value if hasattr(status, "value") else str(status)
+
+
 # =========================
 # Logging
 # =========================
@@ -398,11 +411,18 @@ def unlock_car():
         refresh_and_sync()
         vehicle_id = get_vehicle_id()
 
-        result = vehicle_manager.unlock(vehicle_id)
+        action_id = vehicle_manager.unlock(vehicle_id)
+        final_status = wait_for_action_result(vehicle_id, action_id)
+
+        if final_status != "SUCCESS":
+            return jsonify({
+                "error": f"Unlock command was rejected by the vehicle (status: {final_status})",
+                "result": action_id
+            }), 502
 
         return jsonify({
             "status": "car_unlocked",
-            "result": result
+            "result": action_id
         }), 200
 
     except AuthenticationError as e:
@@ -425,11 +445,18 @@ def lock_car():
         refresh_and_sync()
         vehicle_id = get_vehicle_id()
 
-        result = vehicle_manager.lock(vehicle_id)
+        action_id = vehicle_manager.lock(vehicle_id)
+        final_status = wait_for_action_result(vehicle_id, action_id)
+
+        if final_status != "SUCCESS":
+            return jsonify({
+                "error": f"Lock command was rejected by the vehicle (status: {final_status})",
+                "result": action_id
+            }), 502
 
         return jsonify({
             "status": "car_locked",
-            "result": result
+            "result": action_id
         }), 200
 
     except AuthenticationError as e:
