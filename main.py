@@ -287,8 +287,11 @@ def list_vehicles():
         return jsonify({"error": str(e)}), 500
 
 
-@app.route("/start_climate", methods=["POST"])
-def start_climate():
+@app.route("/start_climate_cool", methods=["POST"])
+def start_climate_cool():
+    """
+    Warm-weather preset: AC on, driver seat high cool.
+    """
     if not authorize_request():
         return jsonify({"error": "Unauthorized"}), 403
 
@@ -298,13 +301,53 @@ def start_climate():
 
         climate_options = ClimateRequestOptions(
             set_temp=72,
-            duration=10
+            duration=10,
+            front_left_seat=5  # High Cool
         )
 
         result = vehicle_manager.start_climate(vehicle_id, climate_options)
 
         return jsonify({
             "status": "climate_started",
+            "preset": "cool",
+            "result": result
+        }), 200
+
+    except AuthenticationError as e:
+        return jsonify({
+            "error": "Authentication failed",
+            "details": str(e),
+            "action": "Open Kia app and complete 2FA"
+        }), 401
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/start_climate_heat", methods=["POST"])
+def start_climate_heat():
+    """
+    Cold-weather preset: driver seat medium heat, steering wheel heat on.
+    """
+    if not authorize_request():
+        return jsonify({"error": "Unauthorized"}), 403
+
+    try:
+        refresh_and_sync()
+        vehicle_id = get_vehicle_id()
+
+        climate_options = ClimateRequestOptions(
+            set_temp=72,
+            duration=10,
+            front_left_seat=7,   # Medium Heat
+            steering_wheel=1     # Heat on
+        )
+
+        result = vehicle_manager.start_climate(vehicle_id, climate_options)
+
+        return jsonify({
+            "status": "climate_started",
+            "preset": "heat",
             "result": result
         }), 200
 
