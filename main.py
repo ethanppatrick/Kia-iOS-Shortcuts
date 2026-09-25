@@ -1,5 +1,6 @@
 import os
 import json
+import time
 import requests
 from flask import Flask, request, jsonify
 from hyundai_kia_connect_api import VehicleManager, ClimateRequestOptions, Token
@@ -144,17 +145,33 @@ def get_vehicle_id():
     return first_vehicle_id
 
 
-def wait_for_action_result(vehicle_id, action_id):
+def action_reported_complete(vehicle_id, action_id, attempts=4, delay_seconds=3):
     """
-    Kia's lock/unlock/climate commands return immediately with just an
-    action id, the actual success or failure (e.g. a door being open)
-    is only known once the vehicle reports back. This blocks until that
-    happens and returns the final ORDER_STATUS as a plain string.
+    Kia's check_action_status doesn't actually wait or retry on its own,
+    despite accepting synchronous/timeout arguments, it's a single instant
+    check. Checking too soon after submitting a command can come back
+    "not done" even though the car handles it fine a moment later, so we
+    do our own short retry loop instead of trusting a single call.
     """
-    status = vehicle_manager.check_action_status(
-        vehicle_id, action_id, synchronous=True, timeout=45
-    )
-    return status.value if hasattr(status, "value") else str(status)
+    for _ in range(attempts):
+        if vehicle_manager.check_action_status(vehicle_id, action_id):
+            return True
+        time.sleep(delay_seconds)
+    return False
+
+
+def confirm_lock_state(vehicle_id, wait_seconds=2):
+    """
+    Fallback for the rare case where Kia's backend never confirms the
+    command completed. This actually wakes the car for a live door-state
+    read rather than trusting a possibly-stale cache, which costs more
+    12V battery than a plain status check, so it's only used when the
+    cheaper check above couldn't resolve things on its own.
+    """
+    time.sleep(wait_seconds)
+    vehicle_manager.force_refresh_vehicle_state(vehicle_id)
+    vehicle = vehicle_manager.get_vehicle(vehicle_id)
+    return vehicle.is_locked
 
 
 # =========================
@@ -412,11 +429,20 @@ def unlock_car():
         vehicle_id = get_vehicle_id()
 
         action_id = vehicle_manager.unlock(vehicle_id)
-        final_status = wait_for_action_result(vehicle_id, action_id)
 
-        if final_status != "SUCCESS":
+        if action_reported_complete(vehicle_id, action_id):
             return jsonify({
-                "error": f"Unlock command was rejected by the vehicle (status: {final_status})",
+                "status": "car_unlocked",
+                "result": action_id
+            }), 200
+
+        # Kia's backend never confirmed completion, fall back to a real
+        # door-state check rather than assume it failed
+        is_locked = confirm_lock_state(vehicle_id)
+
+        if is_locked:
+            return jsonify({
+                "error": "Car did not confirm as unlocked. Kia may have just been slow to report back, try again.",
                 "result": action_id
             }), 502
 
@@ -446,11 +472,20 @@ def lock_car():
         vehicle_id = get_vehicle_id()
 
         action_id = vehicle_manager.lock(vehicle_id)
-        final_status = wait_for_action_result(vehicle_id, action_id)
 
-        if final_status != "SUCCESS":
+        if action_reported_complete(vehicle_id, action_id):
             return jsonify({
-                "error": f"Lock command was rejected by the vehicle (status: {final_status})",
+                "status": "car_locked",
+                "result": action_id
+            }), 200
+
+        # Kia's backend never confirmed completion, fall back to a real
+        # door-state check rather than assume it failed
+        is_locked = confirm_lock_state(vehicle_id)
+
+        if not is_locked:
+            return jsonify({
+                "error": "Car did not confirm as locked. It may be sitting ajar, or Kia was just slow to report back, try again.",
                 "result": action_id
             }), 502
 
